@@ -33,6 +33,8 @@
 #include"Optimizer.h"
 #include"PnPsolver.h"
 
+#include "Util.h"
+
 #include<iostream>
 
 #include<mutex>
@@ -558,6 +560,210 @@ void Tracking::StereoInitialization()
 
         mState=OK;
     }
+}
+
+
+cv::Mat Tracking::TrackMarker(const cv::Mat &im,const double &timestamp)
+{
+    mImGray=im;
+	if (mImGray.channels() == 3) {
+		if (mbRGB)
+			cvtColor(mImGray, mImGray, CV_RGB2GRAY);
+		else
+			cvtColor(mImGray, mImGray, CV_BGR2GRAY);
+	} else if (mImGray.channels() == 4) {
+		if (mbRGB)
+			cvtColor(mImGray, mImGray, CV_RGBA2GRAY);
+		else
+			cvtColor(mImGray, mImGray, CV_BGRA2GRAY);
+	}
+    if(mState==NOT_INITIALIZED||mState==NO_IMAGES_YET)
+    {
+        return cv::Mat();
+    }
+    else
+    {
+        TS(creatFrame);
+
+		if (mState == NOT_INITIALIZED || mState == NO_IMAGES_YET
+				|| mpMap->KeyFramesInMap() <= 3)
+			mCurrentFrame = Frame(mImGray, timestamp, mpIniORBextractor,
+					mpORBVocabulary, mK, mDistCoef, mbf, mThDepth);
+		else
+			mCurrentFrame = Frame(mImGray, timestamp, mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
+        LOG("keypoints:%lu\n",mCurrentFrame.mvKeysUn.size());
+        TE(creatFrame);
+        TS(track);
+        Track();
+        TE(track);
+        cv::Mat pose=mCurrentFrame.mTcw.clone();
+        return pose;
+    }
+}
+
+cv::Mat Tracking::InitMarker(const Frame &markerFrame,int frameWidth,int frameHeight,const float dpi)
+{
+    mCurrentFrame=Frame(markerFrame);
+    LOG("MarkerFrame feature mvKeysUn size:%lu",markerFrame.mvKeysUn.size());
+    const int centerX=frameWidth/2;
+    const int centerY=frameHeight/2;
+    vector<float> scaleFactors=markerFrame.mvScaleFactors;
+    vector<MapPoint*> matchPoints;
+    Map* mpMap=new Map();
+    mvIniP3D.clear();
+    mvIniMatches.clear();
+    for(int i=0;i<markerFrame.mvKeysUn.size();i++)
+    {
+        cv::KeyPoint keyPoint=markerFrame.mvKeysUn[i];
+        float x=keyPoint.pt.x-centerX;
+        float y=keyPoint.pt.y-centerY;
+        float mx=x/dpi*2.54f;
+        float my=y/dpi*2.54f;
+        mvIniP3D.push_back(cv::Point3f(mx,my,0));
+        mvIniMatches.push_back(i);
+        cv::Mat worldPos=cv::Mat(mvIniP3D[i]);
+
+        MapPoint *pMP=new MapPoint(worldPos,mpMap,&mCurrentFrame,i);
+        //        pMP->ComputeDistinctiveDescriptors();
+        //        pMP->UpdateNormalAndDepth();
+        mpMap->AddMapPoint(pMP);
+        matchPoints.push_back(pMP);
+
+    }
+
+    cv::Mat pos;
+//    if(mCurrentFrame.loadFrame(configPath, mvIniMatches))
+//    {
+//        pos=mCurrentFrame.mTcw;
+//        LOG("Load Marker Success.");
+//    }
+//    else
+    {
+        const float th=1.0f;
+        PnPsolver solver=PnPsolver(mCurrentFrame,matchPoints);
+        solver.SetRansacParameters(0.99,100,300,4,0.1,th);
+        bool bNoMore;
+        vector<bool> vbInliers;
+        int nInliers;
+        pos=solver.iterate(100, bNoMore, vbInliers, nInliers);
+        if(bNoMore)
+        {
+            solver.SetRansacParameters(0.8,100,300,4,0.005,th);
+            pos=solver.iterate(200, bNoMore, vbInliers, nInliers);
+        }
+        if(bNoMore)
+        {
+            mpMap->clear();
+            delete  mpMap;
+            LOG("Init Marker Failed!");
+            return cv::Mat();
+        }
+        for(int i=0;i<vbInliers.size();i++)
+        {
+            if(!vbInliers[i])
+            {
+                mvIniMatches[i]=-1;
+            }
+        }
+        LOG("Inliner number:%d",nInliers);
+        mCurrentFrame.SetPose(pos);
+    }
+    delete  mpMap;
+    CreateInitialMapMonocularFromMarker();
+    return pos;
+}
+cv::Mat Tracking::InitMarker(const cv::Mat &im,const float dpi)
+{
+    mImGray=im;
+	if (mImGray.channels() == 3) {
+		if (mbRGB)
+			cvtColor(mImGray, mImGray, CV_RGB2GRAY);
+		else
+			cvtColor(mImGray, mImGray, CV_BGR2GRAY);
+	} else if (mImGray.channels() == 4) {
+		if (mbRGB)
+			cvtColor(mImGray, mImGray, CV_RGBA2GRAY);
+		else
+			cvtColor(mImGray, mImGray, CV_BGRA2GRAY);
+	}
+    mCurrentFrame=Frame(mImGray,0,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
+    cv::Mat pose=InitMarker(mCurrentFrame, im.cols,im.rows,dpi);
+    return pose;
+
+}
+
+void Tracking::CreateInitialMapMonocularFromMarker()
+{
+    // Create KeyFrames
+    KeyFrame* pKFini = new KeyFrame(mCurrentFrame,mpMap,mpKeyFrameDB);
+    KeyFrame* pKFcur = new KeyFrame(mCurrentFrame,mpMap,mpKeyFrameDB);
+
+//    pKFini->ComputeBoW();
+    pKFcur->ComputeBoW();
+
+    // Insert KFs in the map
+    mpMap->AddKeyFrame(pKFini);
+    mpMap->AddKeyFrame(pKFcur);
+
+    // Create MapPoints and asscoiate to keyframes
+    for(size_t i=0; i<mvIniMatches.size();i++)
+    {
+        if(mvIniMatches[i]<0)
+            continue;
+
+        //Create MapPoint.
+        cv::Mat worldPos(mvIniP3D[i]);
+
+        MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpMap,true);
+
+        pKFini->AddMapPoint(pMP,mvIniMatches[i]);
+        pKFcur->AddMapPoint(pMP,mvIniMatches[i]);
+
+        pMP->AddObservation(pKFini,mvIniMatches[i]);
+        pMP->AddObservation(pKFcur,mvIniMatches[i]);
+
+        pMP->ComputeDistinctiveDescriptors();
+        pMP->UpdateNormalAndDepth();
+
+        //Fill Current Frame structure
+        mCurrentFrame.mvpMapPoints[mvIniMatches[i]] = pMP;
+        mCurrentFrame.mvbOutlier[mvIniMatches[i]] = false;
+
+        //Add to Map
+        mpMap->AddMapPoint(pMP);
+
+    }
+
+    // Update Connections
+//    pKFini->UpdateConnections();
+    pKFcur->UpdateConnections();
+
+    // Bundle Adjustment
+    LOG( "New Map created with %lu points.",mpMap->MapPointsInMap());
+
+    Optimizer::GlobalBundleAdjustemnt(mpMap,20);
+
+//    mpLocalMapper->InsertKeyFrame(pKFini);
+    mpLocalMapper->InsertKeyFrame(pKFcur);
+
+    mCurrentFrame.SetPose(pKFcur->GetPose());
+    mnLastKeyFrameId=mCurrentFrame.mnId;
+    mpLastKeyFrame = pKFcur;
+
+    mvpLocalKeyFrames.push_back(pKFcur);
+//    mvpLocalKeyFrames.push_back(pKFini);
+    mvpLocalMapPoints=mpMap->GetAllMapPoints();
+    mpReferenceKF = pKFcur;
+    mCurrentFrame.mpReferenceKF = pKFcur;
+
+    mLastFrame = Frame(mCurrentFrame);
+
+    mpMap->SetReferenceMapPoints(mvpLocalMapPoints);
+
+    mpMap->mvpKeyFrameOrigins.push_back(pKFcur);
+
+    mState=LOST;
+
 }
 
 void Tracking::MonocularInitialization()

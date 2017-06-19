@@ -74,6 +74,9 @@ public:
     // Use this function if you have deactivated local mapping and you only want to localize the camera.
     void InformOnlyTracking(const bool &flag);
 
+    cv::Mat InitMarker(const cv::Mat &im,const float dpi);
+    cv::Mat InitMarker(const Frame &markerFrame,int frameWidth,int frameHeight,const float dpi);
+    cv::Mat TrackMarker(const cv::Mat &im,const double &timestamp);
 
 public:
 
@@ -143,6 +146,9 @@ protected:
 
     bool NeedNewKeyFrame();
     void CreateNewKeyFrame();
+
+    void CreateInitialMapMonocularFromMarker();
+
 
     // In case of performing only localization, this flag is true when there are no matches to
     // points in the map. Still tracking will continue if there are enough matches with temporal points.

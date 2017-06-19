@@ -39,7 +39,7 @@ class Frame;
 class MapPoint
 {
 public:
-    MapPoint(const cv::Mat &Pos, KeyFrame* pRefKF, Map* pMap);
+    MapPoint(const cv::Mat &Pos, KeyFrame* pRefKF, Map* pMap,bool vbMarkerPoint=false);
     MapPoint(const cv::Mat &Pos,  Map* pMap, Frame* pFrame, const int &idxF);
 
     void SetWorldPos(const cv::Mat &Pos);
@@ -145,6 +145,8 @@ protected:
 
      std::mutex mMutexPos;
      std::mutex mMutexFeatures;
+
+     bool mbMarkerPoint;
 };
 
 } //namespace ORB_SLAM
